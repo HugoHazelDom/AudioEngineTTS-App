@@ -3,6 +3,7 @@ import SwiftUI
 import AVFoundation
 
 import Foundation
+import UIKit
 
 import Combine
 
@@ -168,179 +169,156 @@ class BriefingsLibraryModel: ObservableObject {
 
 }
 
+// MARK: - AudioEngine-based Playback
 
-
-// MARK: - AVPlayer-based Audio Playback
-
-
-
-class AVPlayerModel: ObservableObject {
-
+class AudioEngineModel: ObservableObject {
     @Published var isReady = false
-
     @Published var isPlaying = false
-
     @Published var currentTime: Double = 0
-
     @Published var duration: Double = 1
 
+    private let engine = AVAudioEngine()
+    private let player = AVAudioPlayerNode()
+    private var timer: CADisplayLink?
 
+    private var audioFormat: AVAudioFormat?
+    private var pcmData: Data?
+    private var audioFile: AVAudioFile?
 
-    private(set) var player: AVPlayer?
+    var lastLoadedURL: URL?
+    private var seekTime: TimeInterval = 0
+    private var startDate: Date?
 
-    private var playerItem: AVPlayerItem?
+    init() {
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: nil)
+    }
 
-    private var timeObserver: Any?
-
-    private weak var observerPlayer: AVPlayer?
-
-    private var finishObserver: Any?
-
-    private(set) var lastLoadedData: Data?
-
-    private(set) var lastLoadedURL: URL?
-
-
+    func setPCMData(_ data: Data, sampleRate: Double = 24_000) {
+        stop()
+        pcmData = data
+        audioFile = nil
+        let fmt = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: sampleRate, channels: 1, interleaved: true)!
+        audioFormat = fmt
+        let frames = AVAudioFrameCount(data.count / Int(fmt.streamDescription.pointee.mBytesPerFrame))
+        duration = Double(frames) / sampleRate
+        currentTime = 0
+        seekTime = 0
+        isReady = true
+    }
 
     func setAudio(url: URL) {
-
-        // Clean up previous time observer safely
-
-        removeTimeObserverIfNeeded()
-
-
-
-        self.lastLoadedURL = url
-
-        self.playerItem = AVPlayerItem(url: url)
-
-        self.player = AVPlayer(playerItem: playerItem)
-
-        self.isReady = true
-
-        self.isPlaying = false
-
-        self.currentTime = 0
-
-        self.duration = 1
-
-
-
-        if let player = player {
-
-            timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.2, preferredTimescale: 600), queue: .main) { [weak self] time in
-
-                guard let self = self else { return }
-
-                self.currentTime = time.seconds
-
-                if let d = self.player?.currentItem?.duration.seconds, d > 0 {
-
-                    self.duration = d
-
-                }
-
-            }
-
-            observerPlayer = player
-
+        stop()
+        do {
+            let file = try AVAudioFile(forReading: url)
+            audioFile = file
+            audioFormat = file.processingFormat
+            duration = Double(file.length) / file.processingFormat.sampleRate
+            currentTime = 0
+            seekTime = 0
+            isReady = true
+            lastLoadedURL = url
+        } catch {
+            print("Failed to load file: \(error)")
+            isReady = false
         }
-
-
-
-        finishObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: self.playerItem, queue: .main) { [weak self] _ in
-
-            self?.isPlaying = false
-
-            self?.currentTime = self?.duration ?? 0
-
-        }
-
     }
 
-
-
-    func play() {
-
-        guard isReady else { return }
-
-        player?.play()
-
-        isPlaying = true
-
-    }
-
-
+    func play() { startPlayback(from: seekTime) }
 
     func pause() {
-
         guard isReady else { return }
-
-        player?.pause()
-
+        seekTime = currentTime
+        stopEngine()
         isPlaying = false
-
     }
-
-
 
     func seek(to progress: Double) {
-
-        guard isReady, let player = player else { return }
-
-        let newTime = CMTime(seconds: duration * progress, preferredTimescale: 600)
-
-        player.seek(to: newTime)
-
-        self.currentTime = duration * progress
-
+        guard isReady else { return }
+        seekTime = duration * progress
+        if isPlaying {
+            startPlayback(from: seekTime)
+        } else {
+            currentTime = seekTime
+        }
     }
-
-
 
     func stop() {
-
-        player?.pause()
-
+        stopEngine()
         isPlaying = false
-
         isReady = false
-
         currentTime = 0
-
+        seekTime = 0
+        startDate = nil
     }
 
+    private func startPlayback(from time: TimeInterval) {
+        guard let format = audioFormat else { return }
 
+        stopEngine()
 
-    private func removeTimeObserverIfNeeded() {
+        let sampleRate = format.sampleRate
+        let startFrame = AVAudioFramePosition(time * sampleRate)
 
-        if let observer = timeObserver, let player = observerPlayer {
-
-            player.removeTimeObserver(observer)
-
-            timeObserver = nil
-
-            observerPlayer = nil
-
+        if let file = audioFile {
+            let remaining = AVAudioFrameCount(max(0, Int64(file.length) - startFrame))
+            player.scheduleSegment(file, startingFrame: startFrame, frameCount: remaining, at: nil) { [weak self] in
+                DispatchQueue.main.async { self?.playbackEnded() }
+            }
+        } else if let data = pcmData {
+            let bytesPerFrame = Int(format.streamDescription.pointee.mBytesPerFrame)
+            let startByte = Int(startFrame) * bytesPerFrame
+            let subData = data.subdata(in: startByte..<data.count)
+            let frames = AVAudioFrameCount(subData.count / bytesPerFrame)
+            if let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) {
+                buffer.frameLength = frames
+                subData.withUnsafeBytes { ptr in
+                    if let dest = buffer.int16ChannelData?[0] {
+                        memcpy(dest, ptr.baseAddress!, subData.count)
+                    }
+                }
+                player.scheduleBuffer(buffer, at: nil) { [weak self] in
+                    DispatchQueue.main.async { self?.playbackEnded() }
+                }
+            }
         }
 
+        startTimer()
+        do { try engine.start() } catch { print("Engine start error: \(error)") }
+        player.play()
+        startDate = Date()
+        isPlaying = true
     }
 
-
-
-    deinit {
-
-        removeTimeObserverIfNeeded()
-
-        if let finishObs = finishObserver { NotificationCenter.default.removeObserver(finishObs) }
-
+    private func stopEngine() {
+        player.stop()
+        engine.stop()
+        stopTimer()
     }
 
+    private func playbackEnded() {
+        stopEngine()
+        currentTime = duration
+        seekTime = 0
+        isPlaying = false
+    }
+
+    private func startTimer() {
+        timer?.invalidate()
+        timer = CADisplayLink(target: self, selector: #selector(updateTime))
+        timer?.add(to: .main, forMode: .common)
+    }
+
+    private func stopTimer() { timer?.invalidate(); timer = nil }
+
+    @objc private func updateTime() {
+        guard isPlaying, let start = startDate else { return }
+        currentTime = min(duration, seekTime + Date().timeIntervalSince(start))
+        if currentTime >= duration { playbackEnded() }
+    }
+
+    deinit { stopEngine() }
 }
-
-
-
-
 
 // MARK: - ContentView
 
@@ -364,7 +342,7 @@ struct ContentView: View {
 
     @State private var errorMsg = ""
 
-    @StateObject private var playbackModel = AVPlayerModel()
+    @StateObject private var playbackModel = AudioEngineModel()
 
     @StateObject private var briefingsModel = BriefingsLibraryModel()
 
@@ -971,16 +949,12 @@ struct ContentView: View {
             let briefing = try await fetchOpenAIBriefing(topic: topic, length: selectedLength, tone: selectedTone)
 
             loadingStage = "Synthesizing audio..."
-
             let ttsPCMData = try await fetchGoogleTTS(from: briefing)
-
-            loadingStage = "Encoding audio..."
-
-            let m4aURL = try await convertPCMToM4A(ttsPCMData)
-
-            playbackModel.setAudio(url: m4aURL)
-
+            playbackModel.setPCMData(ttsPCMData)
             playbackModel.play()
+            loadingStage = "Encoding audio..."
+            let m4aURL = try await convertPCMToM4A(ttsPCMData)
+            playbackModel.lastLoadedURL = m4aURL
 
         } catch {
 
@@ -1322,7 +1296,7 @@ struct SavedBriefingRow: View {
 
     let briefing: Briefing
 
-    @ObservedObject var playbackModel: AVPlayerModel
+    @ObservedObject var playbackModel: AudioEngineModel
 
     let onDelete: () -> Void
 
