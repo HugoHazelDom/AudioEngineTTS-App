@@ -64,6 +64,16 @@ class BriefingsLibraryModel: ObservableObject {
         }
     }
 
+    func clearAll() {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        for b in briefings {
+            let fileURL = docs.appendingPathComponent(b.filename)
+            try? FileManager.default.removeItem(at: fileURL)
+        }
+        briefings.removeAll()
+        save()
+    }
+
     private func load() {
         do {
             let data = try Data(contentsOf: saveURL)
@@ -181,6 +191,9 @@ struct ContentView: View {
     @State private var showCustomTopicInput = false
     @State private var customTopic = ""
     @State private var errorMsg = ""
+    @State private var lastTopic: String?
+    @State private var lastLength: Int?
+    @State private var lastTone: String?
     @StateObject private var playbackModel = AVPlayerModel()
     @StateObject private var briefingsModel = BriefingsLibraryModel()
 
@@ -320,6 +333,9 @@ struct ContentView: View {
 
                     // --- Generate button ---
                     Button {
+                        lastTopic = topic
+                        lastLength = selectedLength
+                        lastTone = selectedTone
                         Task { await runFlow() }
                     } label: {
                         HStack(spacing: 10) {
@@ -345,6 +361,22 @@ struct ContentView: View {
                     }
                     .disabled(topic.trimmingCharacters(in: .whitespaces).isEmpty || isLoading)
                     .padding(.horizontal, 12)
+
+                    if let lastTopic {
+                        Button {
+                            topic = lastTopic
+                            if let lastLength { selectedLength = lastLength }
+                            if let lastTone { selectedTone = lastTone }
+                            Task { await runFlow() }
+                        } label: {
+                            Text("Regenerate")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.indigo)
+                        .disabled(isLoading)
+                        .padding(.horizontal, 12)
+                    }
 
                     if !errorMsg.isEmpty {
                         Text(errorMsg)
@@ -447,7 +479,10 @@ struct ContentView: View {
                                             briefingsModel.delete(briefing)
                                         }
                                     )
-                                    .background(Color.white.opacity(0.85))
+                                    .background(
+                                        briefing.id == briefingsModel.briefings.first?.id ?
+                                            Color.blue.opacity(0.12) : Color.white.opacity(0.85)
+                                    )
                                     .cornerRadius(16)
                                     .shadow(color: .black.opacity(0.05), radius: 4, x: 0, y: 1)
                                     .padding(.horizontal, 8)
@@ -455,6 +490,12 @@ struct ContentView: View {
                                 }
                             }
                         }.frame(maxHeight: 210)
+
+                        Button("Clear All") {
+                            briefingsModel.clearAll()
+                        }
+                        .foregroundColor(.red)
+                        .padding(.vertical, 4)
                     }
                 }
             }
