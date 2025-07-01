@@ -33,12 +33,15 @@ struct Briefing: Codable, Identifiable, Equatable {
 
 // MARK: - Briefings Library
 
+@MainActor
 class BriefingsLibraryModel: ObservableObject {
     @Published private(set) var briefings: [Briefing] = []
     private let saveURL: URL
 
+    private let docs: URL
+
     init() {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         saveURL = docs.appendingPathComponent("briefings.json")
         load()
     }
@@ -46,7 +49,6 @@ class BriefingsLibraryModel: ObservableObject {
     func add(topic: String, data: Data) throws {
         let id = UUID()
         let filename = "briefing-\(id).m4a"
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let fileURL = docs.appendingPathComponent(filename)
         try data.write(to: fileURL)
         let newBriefing = Briefing(id: id, topic: topic, date: Date(), filename: filename)
@@ -55,7 +57,6 @@ class BriefingsLibraryModel: ObservableObject {
     }
 
     func delete(_ briefing: Briefing) {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let fileURL = docs.appendingPathComponent(briefing.filename)
         try? FileManager.default.removeItem(at: fileURL)
         if let idx = briefings.firstIndex(of: briefing) {
@@ -86,6 +87,7 @@ class BriefingsLibraryModel: ObservableObject {
 
 // MARK: - AVPlayer-based Audio Playback
 
+@MainActor
 class AVPlayerModel: ObservableObject {
     @Published var isReady = false
     @Published var isPlaying = false
@@ -97,7 +99,6 @@ class AVPlayerModel: ObservableObject {
     private var timeObserver: Any?
     private weak var observerPlayer: AVPlayer?
     private var finishObserver: Any?
-    private(set) var lastLoadedData: Data?
     private(set) var lastLoadedURL: URL?
 
     func setAudio(url: URL) {
@@ -184,11 +185,9 @@ struct ContentView: View {
     @StateObject private var playbackModel = AVPlayerModel()
     @StateObject private var briefingsModel = BriefingsLibraryModel()
 
-    var openAIKey: String {
-        guard let key = ProcessInfo.processInfo.environment["OPENAI_KEY"], !key.isEmpty else {
-            fatalError("Missing OPENAI_KEY in environment")
-        }
-        return key
+    var openAIKey: String? {
+        let key = ProcessInfo.processInfo.environment["OPENAI_KEY"]
+        return key?.isEmpty == false ? key : nil
     }
     let trendingTopics = ["Market News", "Quick Tips", "Motivation", "Tech Trends", "Insurance 101"]
     let lengthOptions = [30, 60, 180]
@@ -232,91 +231,18 @@ struct ContentView: View {
                         .multilineTextAlignment(.center)
                         .foregroundStyle(.secondary)
 
-                    // -- Upgraded: Topic chips + custom input --
-                    VStack(spacing: 12) {
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 10) {
-                                ForEach(trendingTopics, id: \.self) { chip in
-                                    Button {
-                                        topic = chip
-                                    } label: {
-                                        Text(chip)
-                                            .padding(.horizontal, 18)
-                                            .padding(.vertical, 8)
-                                            .background(topic == chip ? Color.blue : Color.gray.opacity(0.13))
-                                            .foregroundColor(topic == chip ? .white : .primary)
-                                            .font(.headline)
-                                            .cornerRadius(18)
-                                    }
-                                }
-                                Button {
-                                    topic = ""
-                                    showCustomTopicInput = true
-                                } label: {
-                                    HStack {
-                                        Image(systemName: "square.and.pencil")
-                                        Text("Custom")
-                                    }
-                                    .padding(.horizontal, 16)
-                                    .padding(.vertical, 8)
-                                    .background(topic.isEmpty ? Color.orange.opacity(0.18) : Color.gray.opacity(0.13))
-                                    .cornerRadius(18)
-                                }
-                            }
-                            .padding(.horizontal, 4)
-                        }
-                        // If custom topic dialog is up, show a sheet
-                        .sheet(isPresented: $showCustomTopicInput) {
-                            VStack(spacing: 18) {
-                                Text("Enter your topic")
-                                    .font(.title2)
-                                TextField("Custom topic", text: $customTopic)
-                                    .textFieldStyle(RoundedBorderTextFieldStyle())
-                                    .padding()
-                                Button("Use Topic") {
-                                    topic = customTopic
-                                    showCustomTopicInput = false
-                                }
-                                .disabled(customTopic.trimmingCharacters(in: .whitespaces).isEmpty)
-                                .buttonStyle(.borderedProminent)
-                            }
-                            .padding()
-                        }
-                    }
+                    TopicPickerView(topic: $topic,
+                                   showCustomInput: $showCustomTopicInput,
+                                   customTopic: $customTopic,
+                                   trending: trendingTopics)
 
                     // -- Quick length selector --
-                    HStack {
-                        ForEach(lengthOptions, id: \.self) { secs in
-                            Button {
-                                selectedLength = secs
-                            } label: {
-                                Text(secs == 180 ? "3 min" : "\(secs)s")
-                                    .padding(.horizontal, 14)
-                                    .padding(.vertical, 6)
-                                    .background(selectedLength == secs ? Color.indigo : Color.gray.opacity(0.13))
-                                    .foregroundColor(selectedLength == secs ? .white : .primary)
-                                    .cornerRadius(12)
-                            }
-                        }
-                    }
-                    .padding(.vertical, 2)
+                    LengthPickerView(selected: $selectedLength, options: lengthOptions)
+                        .padding(.vertical, 2)
 
                     // -- Tone selector --
-                    HStack {
-                        ForEach(tones, id: \.self) { tone in
-                            Button {
-                                selectedTone = tone
-                            } label: {
-                                Text(tone)
-                                    .padding(.horizontal, 11)
-                                    .padding(.vertical, 6)
-                                    .background(selectedTone == tone ? Color.green.opacity(0.8) : Color.gray.opacity(0.11))
-                                    .foregroundColor(selectedTone == tone ? .white : .primary)
-                                    .cornerRadius(12)
-                            }
-                        }
-                    }
-                    .padding(.bottom, 2)
+                    TonePickerView(selected: $selectedTone, tones: tones)
+                        .padding(.bottom, 2)
 
                     // --- Generate button ---
                     Button {
@@ -364,58 +290,11 @@ struct ContentView: View {
 
                     // -- Playback/progress UI --
                     if playbackModel.isReady {
-                        VStack(spacing: 16) {
-                            HStack {
-                                Text(timeString(playbackModel.currentTime))
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundColor(.secondary)
-                                Slider(value: Binding(
-                                    get: {
-                                        playbackModel.duration > 0 ? playbackModel.currentTime / playbackModel.duration : 0
-                                    },
-                                    set: { newValue in
-                                        playbackModel.seek(to: newValue)
-                                    }
-                                ), in: 0...1)
-                                Text(timeString(playbackModel.duration))
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundColor(.secondary)
-                            }
-                            .padding(.horizontal, 8)
-
-                            HStack(spacing: 36) {
-                                Button {
-                                    playbackModel.play()
-                                } label: {
-                                    Image(systemName: "play.circle.fill")
-                                        .font(.system(size: 38))
-                                        .foregroundColor(playbackModel.isPlaying ? .gray : .blue)
-                                        .shadow(color: .blue.opacity(0.1), radius: 4, y: 2)
-                                }
-                                .disabled(playbackModel.isPlaying)
-
-                                Button {
-                                    playbackModel.pause()
-                                } label: {
-                                    Image(systemName: "pause.circle.fill")
-                                        .font(.system(size: 38))
-                                        .foregroundColor(playbackModel.isPlaying ? .blue : .gray)
-                                        .shadow(color: .blue.opacity(0.1), radius: 4, y: 2)
-                                }
-                                .disabled(!playbackModel.isPlaying)
-
-                                if !isLoading {
-                                    Button {
-                                        saveCurrentBriefing()
-                                    } label: {
-                                        Image(systemName: "tray.and.arrow.down.fill")
-                                            .font(.system(size: 32))
-                                            .foregroundColor(.green)
-                                    }
-                                }
-                            }
-                        }
-                        .padding(.top, 4)
+                        PlaybackControlsView(
+                            playbackModel: playbackModel,
+                            isLoading: isLoading,
+                            saveAction: saveCurrentBriefing)
+                            .padding(.top, 4)
                     }
                 }
                 .padding(34)
@@ -481,6 +360,8 @@ struct ContentView: View {
         return String(format: "%01d:%02d", minutes, seconds)
     }
 
+    /// Generate the briefing, synthesize audio and begin playback.
+    @MainActor
     func runFlow() async {
         isLoading = true
         errorMsg = ""
@@ -513,9 +394,13 @@ struct ContentView: View {
                 """]
             ]
         ]
+        guard let key = openAIKey else {
+            throw NSError(domain: "OpenAI", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "OPENAI_KEY not set"])
+        }
         var req = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
         req.httpMethod = "POST"
-        req.setValue("Bearer \(openAIKey)", forHTTPHeaderField: "Authorization")
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONSerialization.data(withJSONObject: reqBody)
         let (data, _) = try await URLSession.shared.data(for: req)
@@ -615,18 +500,17 @@ struct ContentView: View {
         export.outputURL = m4aURL
         export.outputFileType = .m4a
 
-        let semaphore = DispatchSemaphore(value: 0)
-        var exportError: Error?
-        export.exportAsynchronously {
-            if export.status != .completed {
-                exportError = export.error ?? NSError(domain: "Audio", code: -2, userInfo: nil)
+        return try await withCheckedThrowingContinuation { continuation in
+            export.exportAsynchronously {
+                defer { try? FileManager.default.removeItem(at: wavURL) }
+                if export.status == .completed {
+                    continuation.resume(returning: m4aURL)
+                } else {
+                    let error = export.error ?? NSError(domain: "Audio", code: -2, userInfo: nil)
+                    continuation.resume(throwing: error)
+                }
             }
-            try? FileManager.default.removeItem(at: wavURL)
-            semaphore.signal()
         }
-        semaphore.wait()
-        if let error = exportError { throw error }
-        return m4aURL
     }
 }
 
@@ -708,5 +592,163 @@ struct SavedBriefingRow: View {
         let url = docs.appendingPathComponent(briefing.filename)
         playbackModel.setAudio(url: url)
         playbackModel.play()
+    }
+}
+
+// MARK: - Subviews
+
+struct TopicPickerView: View {
+    @Binding var topic: String
+    @Binding var showCustomInput: Bool
+    @Binding var customTopic: String
+    let trending: [String]
+
+    var body: some View {
+        VStack(spacing: 12) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(trending, id: \.self) { chip in
+                        Button { topic = chip } label: {
+                            Text(chip)
+                                .padding(.horizontal, 18)
+                                .padding(.vertical, 8)
+                                .background(topic == chip ? Color.blue : Color.gray.opacity(0.13))
+                                .foregroundColor(topic == chip ? .white : .primary)
+                                .font(.headline)
+                                .cornerRadius(18)
+                        }
+                    }
+                    Button {
+                        topic = ""
+                        showCustomInput = true
+                    } label: {
+                        HStack {
+                            Image(systemName: "square.and.pencil")
+                            Text("Custom")
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(topic.isEmpty ? Color.orange.opacity(0.18) : Color.gray.opacity(0.13))
+                        .cornerRadius(18)
+                    }
+                }
+                .padding(.horizontal, 4)
+            }
+            .sheet(isPresented: $showCustomInput) {
+                VStack(spacing: 18) {
+                    Text("Enter your topic")
+                        .font(.title2)
+                    TextField("Custom topic", text: $customTopic)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                        .padding()
+                    Button("Use Topic") {
+                        topic = customTopic
+                        showCustomInput = false
+                    }
+                    .disabled(customTopic.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .buttonStyle(.borderedProminent)
+                }
+                .padding()
+            }
+        }
+    }
+}
+
+struct LengthPickerView: View {
+    @Binding var selected: Int
+    let options: [Int]
+
+    var body: some View {
+        HStack {
+            ForEach(options, id: \.self) { secs in
+                Button { selected = secs } label: {
+                    Text(secs == 180 ? "3 min" : "\(secs)s")
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 6)
+                        .background(selected == secs ? Color.indigo : Color.gray.opacity(0.13))
+                        .foregroundColor(selected == secs ? .white : .primary)
+                        .cornerRadius(12)
+                }
+            }
+        }
+    }
+}
+
+struct TonePickerView: View {
+    @Binding var selected: String
+    let tones: [String]
+
+    var body: some View {
+        HStack {
+            ForEach(tones, id: \.self) { tone in
+                Button { selected = tone } label: {
+                    Text(tone)
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 6)
+                        .background(selected == tone ? Color.green.opacity(0.8) : Color.gray.opacity(0.11))
+                        .foregroundColor(selected == tone ? .white : .primary)
+                        .cornerRadius(12)
+                }
+            }
+        }
+    }
+}
+
+struct PlaybackControlsView: View {
+    @ObservedObject var playbackModel: AVPlayerModel
+    var isLoading: Bool
+    var saveAction: () -> Void
+
+    var body: some View {
+        VStack(spacing: 16) {
+            HStack {
+                Text(timeString(playbackModel.currentTime))
+                    .font(.caption.monospacedDigit())
+                    .foregroundColor(.secondary)
+                Slider(value: Binding(
+                    get: {
+                        playbackModel.duration > 0 ? playbackModel.currentTime / playbackModel.duration : 0
+                    },
+                    set: { playbackModel.seek(to: $0) }
+                ), in: 0...1)
+                Text(timeString(playbackModel.duration))
+                    .font(.caption.monospacedDigit())
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 8)
+
+            HStack(spacing: 36) {
+                Button { playbackModel.play() } label: {
+                    Image(systemName: "play.circle.fill")
+                        .font(.system(size: 38))
+                        .foregroundColor(playbackModel.isPlaying ? .gray : .blue)
+                        .shadow(color: .blue.opacity(0.1), radius: 4, y: 2)
+                }
+                .disabled(playbackModel.isPlaying)
+
+                Button { playbackModel.pause() } label: {
+                    Image(systemName: "pause.circle.fill")
+                        .font(.system(size: 38))
+                        .foregroundColor(playbackModel.isPlaying ? .blue : .gray)
+                        .shadow(color: .blue.opacity(0.1), radius: 4, y: 2)
+                }
+                .disabled(!playbackModel.isPlaying)
+
+                if !isLoading {
+                    Button(action: saveAction) {
+                        Image(systemName: "tray.and.arrow.down.fill")
+                            .font(.system(size: 32))
+                            .foregroundColor(.green)
+                    }
+                }
+            }
+        }
+    }
+
+    private func timeString(_ time: TimeInterval) -> String {
+        let totalSeconds = Int(time)
+        let minutes = totalSeconds / 60
+        let seconds = totalSeconds % 60
+        return String(format: "%01d:%02d", minutes, seconds)
     }
 }
