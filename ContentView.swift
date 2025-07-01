@@ -189,6 +189,10 @@ struct ContentView: View {
     @State private var customTopic = ""
     @StateObject private var playbackModel = AudioPlaybackModel()
     @StateObject private var briefingsModel = BriefingsLibraryModel()
+    @State private var generatedScript: String = ""
+
+    /// Words spoken per minute used when estimating script length
+    private let wordsPerMinute = 150
     var openAIKey: String {
         guard let key = ProcessInfo.processInfo.environment["OPENAI_KEY"], !key.isEmpty else {
             fatalError("Missing OPENAI_KEY in environment")
@@ -301,12 +305,16 @@ struct ContentView: View {
                             Button {
                                 selectedLength = secs
                             } label: {
-                                Text(secs == 180 ? "3 min" : "\(secs)s")
-                                    .padding(.horizontal, 14)
-                                    .padding(.vertical, 6)
-                                    .background(selectedLength == secs ? Color.indigo : Color.gray.opacity(0.13))
-                                    .foregroundColor(selectedLength == secs ? .white : .primary)
-                                    .cornerRadius(12)
+                                VStack {
+                                    Text(secs == 180 ? "3 min" : "\(secs)s")
+                                    Text("~\(wordsForLength(secs)) words")
+                                        .font(.caption2)
+                                }
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 6)
+                                .background(selectedLength == secs ? Color.indigo : Color.gray.opacity(0.13))
+                                .foregroundColor(selectedLength == secs ? .white : .primary)
+                                .cornerRadius(12)
                             }
                         }
                     }
@@ -412,6 +420,17 @@ struct ContentView: View {
                         }
                         .padding(.top, 4)
                     }
+                    if !generatedScript.isEmpty {
+                        ScrollView {
+                            Text(generatedScript)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding()
+                        }
+                        .frame(maxHeight: 150)
+                        .background(Color.white.opacity(0.9))
+                        .cornerRadius(12)
+                        .padding(.top, 8)
+                    }
                 }
                 .padding(34)
                 .background(
@@ -475,12 +494,19 @@ struct ContentView: View {
         return String(format: "%01d:%02d", minutes, seconds)
     }
 
+    /// Calculate roughly how many words fit in the given number of seconds
+    func wordsForLength(_ seconds: Int) -> Int {
+        Int((Double(seconds) / 60.0) * Double(wordsPerMinute))
+    }
+
     func runFlow() async {
         isLoading = true
         playbackModel.stop()
+        generatedScript = ""
         defer { isLoading = false }
         do {
             let briefing = try await fetchOpenAIBriefing(topic: topic, length: selectedLength, tone: selectedTone)
+            generatedScript = briefing
             let audio = try await fetchGoogleTTS(from: briefing)
             try playbackModel.setAudio(audio)
             playbackModel.play()
@@ -490,6 +516,7 @@ struct ContentView: View {
     }
 
     func fetchOpenAIBriefing(topic: String, length: Int, tone: String) async throws -> String {
+        let wordCount = wordsForLength(length)
         let reqBody: [String: Any] = [
             "model": "gpt-4o",
             "messages": [
@@ -504,7 +531,7 @@ struct ContentView: View {
                     "content": """
                     Write a ready-to-speak script on the topic: \(topic).
                     Use a \(tone.lowercased()) tone.
-                    It should be suitable for a spoken update lasting about \(length) seconds.
+                    The script should be around \(wordCount) words (about \(length) seconds).
                     Begin immediately with useful spoken content.
                     Use short, conversational sentences and pause naturally between ideas.
                     Do not include music, intro lines like 'Welcome', or sign-offs.
