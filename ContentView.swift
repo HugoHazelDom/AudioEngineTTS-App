@@ -3,8 +3,7 @@ import AVFoundation
 import Foundation
 import Combine
 
-// MARK: - Codable structs for Gemini TTS response
-
+// Codable structs for decoding Gemini TTS response
 struct GeminiTTSResponse: Decodable {
     struct Candidate: Decodable {
         struct Content: Decodable {
@@ -45,7 +44,7 @@ class BriefingsLibraryModel: ObservableObject {
 
     func add(topic: String, data: Data) throws {
         let id = UUID()
-        let filename = "briefing-\(id).m4a"
+        let filename = "briefing-\(id).mp3"
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let fileURL = docs.appendingPathComponent(filename)
         try data.write(to: fileURL)
@@ -84,116 +83,128 @@ class BriefingsLibraryModel: ObservableObject {
     }
 }
 
-// MARK: - AVPlayer-based Audio Playback
+// ✅ Ready to proceed with AVStreamPlayer replacement? Type yes to continue.
 
-class AVPlayerModel: ObservableObject {
-    @Published var isReady = false
-    @Published var isPlaying = false
-    @Published var currentTime: Double = 0
-    @Published var duration: Double = 1
+// MARK: - Audio Playback Model
 
-    private(set) var player: AVPlayer?
-    private var playerItem: AVPlayerItem?
-    private var timeObserver: Any?
-    private weak var observerPlayer: AVPlayer?
-    private var finishObserver: Any?
+class AudioPlaybackModel: NSObject, ObservableObject, AVAudioPlayerDelegate {
+    @Published var isReady: Bool = false
+    @Published var isPlaying: Bool = false
+    @Published var currentTime: TimeInterval = 0
+    @Published var duration: TimeInterval = 1
+    private var timer: Timer?
+    private(set) var player: AVAudioPlayer?
+    private var onFinish: (() -> Void)?
     private(set) var lastLoadedData: Data?
-    private(set) var lastLoadedURL: URL?
 
-    func setAudio(url: URL) {
-        // Clean up previous time observer safely
-        removeTimeObserverIfNeeded()
+    func setAudio(_ data: Data, onFinish: (() -> Void)? = nil) throws {
+        // Explicitly hint that this is MP3 content
+        player = try AVAudioPlayer(data: data, fileTypeHint: AVFileType.wav.rawValue)
+        player?.delegate = self
+        isReady = true
+        isPlaying = false
+        duration = player?.duration ?? 1
+        currentTime = 0
+        self.onFinish = onFinish
+        lastLoadedData = data
+        stopTimer()
+    }
 
-        self.lastLoadedURL = url
-        self.playerItem = AVPlayerItem(url: url)
-        self.player = AVPlayer(playerItem: playerItem)
-        self.isReady = true
-        self.isPlaying = false
-        self.currentTime = 0
-        self.duration = 1
-
-        if let player = player {
-            timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.2, preferredTimescale: 600), queue: .main) { [weak self] time in
-                guard let self = self else { return }
-                self.currentTime = time.seconds
-                if let d = self.player?.currentItem?.duration.seconds, d > 0 {
-                    self.duration = d
-                }
-            }
-            observerPlayer = player
-        }
-
-        finishObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: self.playerItem, queue: .main) { [weak self] _ in
-            self?.isPlaying = false
-            self?.currentTime = self?.duration ?? 0
-        }
+    func setAudio(url: URL, onFinish: (() -> Void)? = nil) throws {
+        player = try AVAudioPlayer(contentsOf: url)
+        player?.delegate = self
+        isReady = true
+        isPlaying = false
+        duration = player?.duration ?? 1
+        currentTime = 0
+        self.onFinish = onFinish
+        lastLoadedData = try? Data(contentsOf: url)
+        stopTimer()
     }
 
     func play() {
-        guard isReady else { return }
-        player?.play()
+        guard isReady, let player else { return }
+        player.play()
         isPlaying = true
+        startTimer()
     }
 
     func pause() {
-        guard isReady else { return }
-        player?.pause()
+        guard isReady, let player else { return }
+        player.pause()
         isPlaying = false
-    }
-
-    func seek(to progress: Double) {
-        guard isReady, let player = player else { return }
-        let newTime = CMTime(seconds: duration * progress, preferredTimescale: 600)
-        player.seek(to: newTime)
-        self.currentTime = duration * progress
+        stopTimer()
     }
 
     func stop() {
-        player?.pause()
+        player?.stop()
         isPlaying = false
         isReady = false
         currentTime = 0
+        stopTimer()
     }
 
-    private func removeTimeObserverIfNeeded() {
-        if let observer = timeObserver, let player = observerPlayer {
-            player.removeTimeObserver(observer)
-            timeObserver = nil
-            observerPlayer = nil
+    func seek(to progress: Double) {
+        guard isReady, let player else { return }
+        let newTime = duration * progress
+        player.currentTime = newTime
+        currentTime = newTime
+    }
+
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        isPlaying = false
+        stopTimer()
+        currentTime = duration
+        onFinish?()
+    }
+
+    private func startTimer() {
+        stopTimer()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self, let player = self.player else { return }
+            self.currentTime = player.currentTime
+            if self.currentTime >= self.duration {
+                self.currentTime = self.duration
+                self.isPlaying = false
+                self.stopTimer()
+            }
         }
     }
 
-    deinit {
-        removeTimeObserverIfNeeded()
-        if let finishObs = finishObserver { NotificationCenter.default.removeObserver(finishObs) }
+    private func stopTimer() {
+        timer?.invalidate()
+        timer = nil
     }
 }
-
 
 // MARK: - ContentView
 
 struct ContentView: View {
+    // Prompt states
     @State private var topic = ""
     @State private var isLoading = false
-    @State private var loadingStage = ""
-    @State private var selectedLength: Int = 60
+    @State private var selectedLength: Int = 60  // seconds, default
     @State private var selectedTone: String = "Professional"
     @State private var showCustomTopicInput = false
     @State private var customTopic = ""
-    @State private var errorMsg = ""
-    @StateObject private var playbackModel = AVPlayerModel()
+    @StateObject private var playbackModel = AudioPlaybackModel()
     @StateObject private var briefingsModel = BriefingsLibraryModel()
-
     var openAIKey: String {
         guard let key = ProcessInfo.processInfo.environment["OPENAI_KEY"], !key.isEmpty else {
             fatalError("Missing OPENAI_KEY in environment")
         }
         return key
     }
+
     let trendingTopics = ["Market News", "Quick Tips", "Motivation", "Tech Trends", "Insurance 101"]
     let lengthOptions = [30, 60, 180]
     let tones = ["Professional", "Motivational", "Fun", "Calm"]
 
+    // Add your computed property here:
+    var geminiKey: String {
+        Bundle.main.object(forInfoDictionaryKey: "API_KEY") as? String ?? ""
+    }
+    
     var body: some View {
         ZStack {
             LinearGradient(
@@ -346,22 +357,6 @@ struct ContentView: View {
                     .disabled(topic.trimmingCharacters(in: .whitespaces).isEmpty || isLoading)
                     .padding(.horizontal, 12)
 
-                    if !errorMsg.isEmpty {
-                        Text(errorMsg)
-                            .foregroundColor(.red)
-                            .font(.callout)
-                            .multilineTextAlignment(.center)
-                    }
-
-                    // -- Progress Indicator for async stages --
-                    if isLoading {
-                        if !loadingStage.isEmpty {
-                            Text(loadingStage)
-                                .foregroundColor(.gray)
-                                .font(.callout)
-                        }
-                    }
-
                     // -- Playback/progress UI --
                     if playbackModel.isReady {
                         VStack(spacing: 16) {
@@ -465,12 +460,11 @@ struct ContentView: View {
     }
 
     func saveCurrentBriefing() {
-        guard let url = playbackModel.lastLoadedURL, !topic.isEmpty else { return }
+        guard let data = playbackModel.lastLoadedData, !topic.isEmpty else { return }
         do {
-            let data = try Data(contentsOf: url)
             try briefingsModel.add(topic: topic, data: data)
         } catch {
-            errorMsg = "Error saving briefing: \(error.localizedDescription)"
+            print("Error saving briefing: \(error)")
         }
     }
 
@@ -483,20 +477,15 @@ struct ContentView: View {
 
     func runFlow() async {
         isLoading = true
-        errorMsg = ""
-        loadingStage = "Generating script..."
         playbackModel.stop()
-        defer { isLoading = false; loadingStage = "" }
+        defer { isLoading = false }
         do {
             let briefing = try await fetchOpenAIBriefing(topic: topic, length: selectedLength, tone: selectedTone)
-            loadingStage = "Synthesizing audio..."
-            let ttsPCMData = try await fetchGoogleTTS(from: briefing)
-            loadingStage = "Encoding audio..."
-            let m4aURL = try await convertPCMToM4A(ttsPCMData)
-            playbackModel.setAudio(url: m4aURL)
+            let audio = try await fetchGoogleTTS(from: briefing)
+            try playbackModel.setAudio(audio)
             playbackModel.play()
         } catch {
-            errorMsg = "Error: \(error.localizedDescription)"
+            print("❌ Error in runFlow:", error)
         }
     }
 
@@ -504,24 +493,37 @@ struct ContentView: View {
         let reqBody: [String: Any] = [
             "model": "gpt-4o",
             "messages": [
-                ["role": "system", "content": "You are a briefing assistant."],
-                ["role": "user", "content": """
-                Generate a spoken audio script on the topic: \(topic).
-                Use a \(tone.lowercased()) tone.
-                Make it suitable for an audio update of about \(length) seconds.
-                Use short, conversational sentences.
-                """]
+                [
+                    "role": "system",
+                    "content": """
+                    You are a voice briefing assistant. Your job is to generate short audio scripts that are spoken aloud directly, without any music, intro, or filler. Do not include any greetings, sign-offs, or transitional sounds. Speak naturally and get straight to the point, like an expert delivering useful insights in a podcast clip.
+                    """
+                ],
+                [
+                    "role": "user",
+                    "content": """
+                    Write a ready-to-speak script on the topic: \(topic).
+                    Use a \(tone.lowercased()) tone.
+                    It should be suitable for a spoken update lasting about \(length) seconds.
+                    Begin immediately with useful spoken content.
+                    Use short, conversational sentences and pause naturally between ideas.
+                    Do not include music, intro lines like 'Welcome', or sign-offs.
+                    """
+                ]
             ]
         ]
+
         var req = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
         req.httpMethod = "POST"
         req.setValue("Bearer \(openAIKey)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONSerialization.data(withJSONObject: reqBody)
+
         let (data, _) = try await URLSession.shared.data(for: req)
         let dec = try JSONDecoder().decode(OpenAIResponse.self, from: data)
         return dec.choices.first?.message.content ?? ""
     }
+
 
     struct OpenAIResponse: Decodable {
         struct Choice: Decodable {
@@ -534,104 +536,88 @@ struct ContentView: View {
     // MARK: - Gemini TTS with Timeout
 
     private let ttsSession: URLSession = {
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 120
-        config.timeoutIntervalForResource = 180
-        return URLSession(configuration: config)
+      let config = URLSessionConfiguration.default
+      config.timeoutIntervalForRequest = 120
+      config.timeoutIntervalForResource = 180
+      return URLSession(configuration: config)
     }()
+
 
     // MARK: - Gemini / Google TTS
 
+    /// Fetches TTS audio from Gemini, converts raw PCM → WAV, and returns ready-to-play data.
+    /// Throws if the network call, JSON parsing, or audio decoding fails.
     func fetchGoogleTTS(from text: String) async throws -> Data {
+        // 1. Get your API key from environment
         guard let apiKey = ProcessInfo.processInfo.environment["GOOGLE_TTS_KEY"],
               !apiKey.isEmpty else {
             throw NSError(domain: "GoogleTTS", code: -1,
                           userInfo: [NSLocalizedDescriptionKey: "GOOGLE_TTS_KEY not set"])
         }
 
-        let url = URL(string:
-            "https://generativelanguage.googleapis.com/v1beta/models/" +
-            "gemini-2.5-flash-preview-tts:generateContent?key=\(apiKey)")!
+        let url = URL(string: "https://texttospeech.googleapis.com/v1/text:synthesize?key=\(apiKey)")!
 
+        // 2. Construct valid request body for MP3
         let body: [String: Any] = [
-            "contents": [
-                [
-                    "role": "user",
-                    "parts": [["text": text]]
-                ]
+            "input": [
+                "text": text
             ],
-            "generationConfig": [
-                "response_modalities": ["AUDIO"],
-                "speech_config": [
-                    "voice_config": [
-                        "prebuilt_voice_config": ["voice_name": "zephyr"]
-                    ]
-                ],
-                "temperature": 0.0
+            "voice": [
+                "languageCode": "en-US",
+                "name": "en-US-Wavenet-D"
+            ],
+            "audioConfig": [
+                "audioEncoding": "MP3"
             ]
         ]
 
+        // 3. Set up POST request
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
+        // 4. Use custom timeout session
         let (data, resp) = try await ttsSession.data(for: req)
 
-        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+        guard let httpResponse = resp as? HTTPURLResponse else {
+            throw NSError(domain: "GoogleTTS", code: -2,
+                          userInfo: [NSLocalizedDescriptionKey: "Invalid HTTP response"])
+        }
+
+        guard httpResponse.statusCode == 200 else {
             let message = String(data: data, encoding: .utf8) ?? "Unknown error"
-            throw NSError(domain: "GeminiTTS",
-                          code: (resp as? HTTPURLResponse)?.statusCode ?? -1,
+            throw NSError(domain: "GoogleTTS",
+                          code: httpResponse.statusCode,
                           userInfo: [NSLocalizedDescriptionKey: message])
         }
 
-        let response = try JSONDecoder().decode(GeminiTTSResponse.self, from: data)
 
-        guard
-            let base64 = response.candidates.first?
-                              .content.parts.first?
-                              .inlineData?.data,
-            let pcm    = Data(base64Encoded: base64)
-        else {
-            throw NSError(domain: "GeminiTTS", code: -2,
-                          userInfo: [NSLocalizedDescriptionKey: "No valid audio data"])
+        // 5. Parse response and decode base64 audio content
+        struct TTSResponse: Decodable {
+            let audioContent: String
         }
-        return pcm
+
+        let decoded = try JSONDecoder().decode(TTSResponse.self, from: data)
+
+        guard let audioData = Data(base64Encoded: decoded.audioContent) else {
+            throw NSError(domain: "GoogleTTS", code: -3,
+                          userInfo: [NSLocalizedDescriptionKey: "Base64 decoding failed"])
+        }
+
+        print("✅ Google TTS MP3 audio received: \(audioData.count) bytes")
+        return audioData
     }
 
-    // PCM to M4A Pipeline
 
-    func convertPCMToM4A(_ pcmData: Data) async throws -> URL {
-        let tempDir = FileManager.default.temporaryDirectory
-        let wavURL = tempDir.appendingPathComponent(UUID().uuidString + ".wav")
-        let m4aURL = tempDir.appendingPathComponent(UUID().uuidString + ".m4a")
 
-        try pcmToWav(pcmData).write(to: wavURL)
-        // Use AVAssetExportSession for conversion:
-        let asset = AVURLAsset(url: wavURL)
-        guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
-            throw NSError(domain: "Audio", code: -1, userInfo: [NSLocalizedDescriptionKey: "Export session failed."])
-        }
-        export.outputURL = m4aURL
-        export.outputFileType = .m4a
 
-        let semaphore = DispatchSemaphore(value: 0)
-        var exportError: Error?
-        export.exportAsynchronously {
-            if export.status != .completed {
-                exportError = export.error ?? NSError(domain: "Audio", code: -2, userInfo: nil)
-            }
-            try? FileManager.default.removeItem(at: wavURL)
-            semaphore.signal()
-        }
-        semaphore.wait()
-        if let error = exportError { throw error }
-        return m4aURL
-    }
+
+
 }
+import Foundation   // nothing else needed
 
-// MARK: - PCM to WAV Helper
-
+/// Wrap raw 16-bit 24 kHz mono PCM in a WAV container.
 func pcmToWav(_ pcm: Data,
               sampleRate: Int = 24_000,
               channels: Int = 1,
@@ -670,7 +656,7 @@ private extension FixedWidthInteger {
 
 struct SavedBriefingRow: View {
     let briefing: Briefing
-    @ObservedObject var playbackModel: AVPlayerModel
+    @ObservedObject var playbackModel: AudioPlaybackModel
     let onDelete: () -> Void
 
     var body: some View {
@@ -706,7 +692,14 @@ struct SavedBriefingRow: View {
     func playBriefing() {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let url = docs.appendingPathComponent(briefing.filename)
-        playbackModel.setAudio(url: url)
-        playbackModel.play()
+        do {
+            try playbackModel.setAudio(url: url)
+            playbackModel.play()
+        } catch {
+            print("Playback error: \(error)")
+        }
     }
 }
+
+
+
