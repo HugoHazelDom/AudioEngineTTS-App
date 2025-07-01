@@ -576,8 +576,9 @@ struct ContentView: View {
 
     private let ttsSession: URLSession = {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 120
-        config.timeoutIntervalForResource = 180
+        // Longer timeout to handle larger 3 minute responses
+        config.timeoutIntervalForRequest = 240
+        config.timeoutIntervalForResource = 360
         return URLSession(configuration: config)
     }()
 
@@ -605,7 +606,8 @@ struct ContentView: View {
                 "response_modalities": ["AUDIO"],
                 "speech_config": [
                     "voice_config": [
-                        "prebuilt_voice_config": ["voice_name": "zephyr"]
+                        "prebuilt_voice_config": ["voice_name": "zephyr"],
+                        "speaking_rate": 1.25
                     ]
                 ],
                 "temperature": 0.0
